@@ -131,6 +131,18 @@ app.include_router(starter_prompts.router)
 app.include_router(health.router)
 ```
 
+> **As-built (`feat/observability-base`)**: the request logger shipped as a
+> named `RequestLoggingMiddleware(BaseHTTPMiddleware)` class added via
+> `app.add_middleware(RequestLoggingMiddleware)` (not the
+> `app.middleware("http")(request_logging_middleware)` function shown
+> above) — for symmetry with the other `api/` middlewares and so the order
+> canary asserts a real class name. `CORSMiddleware` is replaced by
+> `api/_cors.py:LoggingCORSMiddleware` (a subclass that emits
+> `cors.preflight_rejected`). The innermost-request-logging consequence —
+> `cors.preflight_rejected` / `ratelimit.hit` carry no `request_id` — and
+> the rest of the deltas are catalogued in `10-observability.md`
+> §"As-Built Notes".
+
 ### Middleware ordering reasoning
 
 FastAPI / Starlette middleware is **outer-first on request, inner-first

@@ -86,10 +86,19 @@ wrapped by the client rather than baked into the diff. (Previous
 sessions wrapped at 72 chars; the no-wrap convention is locked from
 2026-05-29 onward.)
 
-**Forbidden in commit messages and PR bodies**: build-phase or "Day N"
-references. `PROGRESS.md` is the only place where Day-N labels live;
-commits and PRs are the public git history and must not reference the
-internal planning calendar.
+**Forbidden in commit messages and PR bodies**:
+
+1. **Build-phase / "Day N" references.** `PROGRESS.md` is the only place
+   where Day-N labels live.
+2. **Pointers to internal planning/tracking docs** — `CLAUDE.md` Gotcha
+   numbers, `Fork N` / `G-item` IDs, `PROGRESS.md`, or `context/*.md`
+   citations. State the reasoning in plain, self-contained terms instead
+   (a reviewer reading the commit log won't have those documents in front
+   of them). Keep Gotcha / Fork / context-file pointers in
+   chunk-completion chat messages and `PROGRESS.md` only.
+
+Commits and PRs are the public git history and must not reference the
+internal planning calendar or planning documents.
 
 ### EVALUATION.md handling
 
@@ -205,6 +214,7 @@ rag-case-study/
 ├── Makefile                        ← canonical workflow entry point (`make help`)
 ├── openapi.json                    ← FastAPI OpenAPI snapshot (G3, regenerated via `make openapi`)
 ├── .tool-versions                  ← Python / Node / pnpm pins (mise / asdf)
+├── .gitleaks.toml                  ← gitleaks config (extends default ruleset; allowlists the scrubber test's fake-key fixtures)
 ├── scripts/
 │   └── setup.sh                    ← interactive first-time setup
 ├── .github/workflows/
@@ -219,11 +229,12 @@ rag-case-study/
 │   ├── src/customs_agent/          ← src-layout package
 │   │   ├── main.py                 ← FastAPI app + lifespan + middleware stack (PR #9)
 │   │   ├── config/                 ← package: __init__.py (singleton + MANIFEST_PATH) + _settings.py + starter_prompts.py
-│   │   ├── api/                    ← auth.py + _rate_limit.py + _security_headers.py + _request_id.py + chat.py + health.py + starter_prompts.py
+│   │   ├── api/                    ← auth.py + _rate_limit.py + _security_headers.py + _cors.py + chat.py + health.py + starter_prompts.py
 │   │   ├── agent/                  ← loop + bootstrap + refusal + validator + history + contracts + prompt + _dispatch
 │   │   ├── tools/                  ← 8 typed tools (Fork 22 complete) + _filters + _allowlists + _shared
 │   │   ├── rag/                    ← chunker + retriever + always_on + _tokenize
-│   │   └── data/                   ← load + views + validation
+│   │   ├── data/                   ← load + views + validation
+│   │   └── observability/          ← events (taxonomy) + scrubber + logging (configure_logging + RequestLoggingMiddleware)
 │   ├── prompts/                    ← system-prompt section files (Fork 27)
 │   ├── scripts/
 │   │   ├── build_index.py          ← build-time RAG indexing (Fork 17)
@@ -233,8 +244,8 @@ rag-case-study/
 │   │   ├── conftest.py             ← root env shim (5 setdefault: ANTHROPIC_API_KEY, BACKEND_API_KEY, ALLOWED_ORIGINS, OPENAI_API_KEY, RATELIMIT_ENABLED=false)
 │   │   ├── _fakes.py               ← shared Anthropic SDK fakes + FakeRetriever (cross-conftest reuse for unit + integration + eval)
 │   │   ├── ground_truth.py + ground_truth.json    ← canonical answer key (Fork 43)
-│   │   ├── unit/                   ← api/ + data/ + agent/ + tools/ + rag/ + eval/ subdirs (per-subdir conftest)
-│   │   ├── integration/            ← FastAPI app via TestClient (PR #9) + stub_llm.py + agent-loop tests (Day 4)
+│   │   ├── unit/                   ← api/ + data/ + agent/ + tools/ + rag/ + eval/ + observability/ subdirs (per-subdir conftest)
+│   │   ├── integration/            ← FastAPI app via TestClient (PR #9) + stub_llm.py + agent-loop tests + test_request_logging (Day 4)
 │   │   └── eval/                   ← real-LLM eval (Day 4): _grading + _report + conftest + test_questions + test_out_of_scope
 │   ├── chroma_db/ + bm25.pkl + manifest.json  ← `make build-index` artifacts (gitignored; Docker bakes; CI builds before integration tests; /ready reads manifest.json)
 │   ├── pyproject.toml + uv.lock    ← uv-managed Python deps
@@ -358,15 +369,23 @@ forgotten. Every session must remember them.
     `entries_v` (and entry-grain rollups on `entry_lines_v`) at the
     schema boundary, with error messages naming the correct view so the
     LLM can self-correct.
-11. **`structlog` is intentionally unconfigured pre-`feat/observability-base`**.
-    The data layer's `validation.py` already calls
-    `structlog.get_logger()` and emits a boot-time INFO event using the
-    library default (stderr console output). The proper boot
-    configuration — dev vs. prod renderer split (Fork 54), secret-shape
-    scrubber processor (Fork 53), request-context binding — lands on
-    `feat/observability-base`. Until then, do not "fix" the unconfigured
-    state; once that branch lands, existing callers pick up the full
-    config automatically at module import.
+11. **structlog is configured at `main.py` IMPORT (landed on
+    `feat/observability-base`).**
+    `observability/logging.py:configure_logging(environment)` sets the
+    processor chain (`merge_contextvars → TimeStamper(iso) →
+    add_log_level → scrub_secrets → renderer`); the renderer is
+    `JSONRenderer` when `ENVIRONMENT=production` (Fly) else
+    `ConsoleRenderer` (Fork 54), with the secret-shape scrubber (Fork 53)
+    always in the chain. `main.py` calls it at MODULE IMPORT — not in
+    lifespan — so every `structlog.get_logger()` caller, including the
+    boot-time `data.validation.complete` event, picks up the full config.
+    **`cache_logger_on_first_use=False` is deliberate** (the
+    `context/10-observability.md` snippet shows `True`): because the
+    config runs at import, `True` would let already-cached bound loggers
+    bypass `structlog.testing.capture_logs`, breaking the unit tests that
+    assert on log output. `observability/events.py:Events` is the single
+    source of truth for event names — every `log.*` call references a
+    constant, never a string literal.
 12. **Refusal marker mechanism** (Fork 25, locked on `feat/agent-loop`).
     The agent loop detects refusals by parsing an HTML-comment marker
     at the start of the LLM's response:
@@ -399,8 +418,8 @@ forgotten. Every session must remember them.
     `self.user_middleware.insert(0, ...)` at
     `starlette/applications.py:101`. The intuitive read ("first added
     = outermost") is backwards. In `main.py`, add middlewares in
-    INNER → OUTER order: `RequestIdMiddleware` first, then
-    `SlowAPIMiddleware`, then `CORSMiddleware`, then
+    INNER → OUTER order: `RequestLoggingMiddleware` first, then
+    `SlowAPIMiddleware`, then `LoggingCORSMiddleware`, then
     `SecurityHeadersMiddleware` LAST so SEM ends up outermost. The
     misorder is silent — slowapi 429 responses + CORS preflight 200s
     short-circuit before reaching inner middleware, so SEM-as-inner
@@ -408,8 +427,12 @@ forgotten. Every session must remember them.
     `test_main_app_user_middleware_outermost_is_security_headers`
     integration test in
     `backend/tests/integration/test_security_headers.py` is the
-    canary; any future refactor that re-introduces the bug fails here
-    first.
+    canary — it asserts the exact class names (SEM outermost,
+    `RequestLoggingMiddleware` innermost, `LoggingCORSMiddleware`
+    present); any future refactor that re-introduces the bug fails here
+    first. Consequence of `RequestLoggingMiddleware` being innermost:
+    short-circuit events fire OUTSIDE the request-logging scope — see
+    Gotcha #28.
 15. **`AgentLoopSettings` must be built from `Settings` at lifespan**
     (PR #9 Copilot Comment 2, fixed before merge). The agent loop
     signature is `run_agent(ctx, user_message, history, request_id, *,
@@ -586,6 +609,49 @@ forgotten. Every session must remember them.
     prefer_view="entry_lines_v")` reads the grain-correct value regardless
     of call order. The eval record + `REPORT.md` now capture each tool
     call (name / view / args / result) so failures are self-diagnosing.
+27. **`request_id` is `req_<12 hex>`, bound to BOTH `request.state` and a
+    structlog contextvar** (`feat/observability-base`).
+    `RequestLoggingMiddleware.dispatch` sets
+    `request_id = f"req_{uuid.uuid4().hex[:12]}"` (16 chars) — NOT the
+    bare 36-char `uuid4()` the interim `RequestIdMiddleware` used. It
+    flows into `ResponseMeta.request_id` and is the join key for stdout
+    logs. `api/chat.py` still reads `request.state.request_id`; the
+    contextvar (via `merge_contextvars`) auto-stamps it onto events that
+    don't pass it explicitly. Tests assert the `req_` prefix + length 16,
+    not `>= 32`. Related: `require_api_key` now takes a `request: Request`
+    first param so `auth.missing_key` / `auth.invalid_key` can log
+    `client_ip` + `path` — schema-invisible (no `openapi.json` drift); the
+    auth unit tests construct a minimal ASGI `Request`.
+28. **`cors.preflight_rejected` and `ratelimit.hit` carry NO `request_id`
+    — by design** (`feat/observability-base`; PR #16 Copilot Comment 2,
+    judged spec-aligned, NOT changed). `RequestLoggingMiddleware` is the
+    INNERMOST user middleware (so `SecurityHeadersMiddleware` stays
+    outermost — Gotcha #14). CORS preflight rejections (emitted by
+    `LoggingCORSMiddleware`, a `CORSMiddleware` subclass overriding
+    `preflight_response`) and slowapi 429s short-circuit in layers OUTER
+    to request logging, so the `request_id` contextvar isn't bound when
+    they fire and no `request.received/completed` is logged for them. The
+    taxonomy treats these as trace-less events. Do NOT "fix" this by
+    moving `RequestLoggingMiddleware` outward without weighing it against
+    the SEM-outermost invariant + the order canary — it's an intentional
+    trade-off, not a bug.
+29. **gitleaks flags fake test fixtures → root `.gitleaks.toml` path
+    allowlist** (`feat/observability-base`, PR #16 `secret-scan` failure).
+    `tests/unit/observability/test_scrubber.py` holds deliberately-fake,
+    shape-accurate provider keys to exercise the scrubber;
+    `FAKE_LANGFUSE_SECRET = "sk-lf-…"` tripped gitleaks' `generic-api-key`
+    rule (identifier contains "secret" + entropy ≥ threshold). Fixed with
+    a root `.gitleaks.toml` (`[extend] useDefault = true` keeps all
+    default rules + an `[allowlist] paths` regex for that one test file).
+    Why a config allowlist and not a code change: the finding lives in
+    committed history and `gitleaks-action` scans the COMMIT RANGE, so
+    working-tree fixes (rename the var, lower the entropy, inline
+    `# gitleaks:allow`) don't change the historical commit's diff and the
+    range scan re-flags it. A path allowlist is read at scan time, clears
+    the finding across the range, AND survives the rebase-merge SHA
+    rewrite — unlike a fingerprint `.gitleaksignore` entry (the SHA
+    changes on rebase). `useDefault = true` is required or the custom
+    config REPLACES the default ruleset entirely.
 
 ---
 

@@ -620,7 +620,10 @@ regressions before they reach `main`.
 ## Observability of Security Events (Fork 10 + 52)
 
 Every security-relevant control fires a stdout event with the same
-`request_id` for cross-store join:
+`request_id` for cross-store join — EXCEPT `cors.preflight_rejected` and
+`ratelimit.hit`, which short-circuit in middlewares OUTER to the
+(innermost) request-logging middleware and therefore carry no `request_id`
+(by design — see `10-observability.md` §"As-Built Notes"):
 
 | Event (stdout JSON) | Trigger | Langfuse span attribute |
 |---|---|---|

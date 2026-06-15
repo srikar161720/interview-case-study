@@ -48,6 +48,55 @@ click pivot from grep'd log to visual trace.
 
 ---
 
+## As-Built Notes (`feat/observability-base` landed)
+
+The `configure_logging` + middleware snippets below are the design intent;
+the shipped code differs in a few deliberate ways (deferred here from the
+build session per the spec-drift workflow):
+
+- **`configure_logging` uses `cache_logger_on_first_use=False`** (the
+  snippet shows `True`). `main.py` calls `configure_logging()` at MODULE
+  import, and `True` would let already-cached bound loggers bypass
+  `structlog.testing.capture_logs`, breaking the unit tests that assert on
+  log output. The function takes `environment` (defaulting to
+  `settings.environment`) so tests can exercise both renderers directly.
+- **The request-logging middleware ships as a named
+  `RequestLoggingMiddleware(BaseHTTPMiddleware)` class**, not the
+  `app.middleware("http")(request_logging_middleware)` function shown
+  below — for symmetry with the other `api/` middlewares and so the
+  middleware-order canary asserts a real class name. The contextvar
+  bind-before-`call_next` behavior is identical.
+- **`request_id` format is `req_<12 hex>`** (16 chars), bound to BOTH
+  `request.state` (back-compat for `api/chat.py`) and the contextvar.
+- **Length-only metadata placement.** The middleware logs `content_length`
+  (from the `Content-Length` header — no body read) on `request.received`;
+  the precise per-message `user_message_length` lands on
+  `agent.run.started` (`agent/loop.py`), NOT on `request.received` as the
+  field table below implies. This avoids consuming the request body stream
+  and the `BaseHTTPMiddleware` child→parent contextvar limitation.
+- **`request_id` is NOT present on `cors.preflight_rejected` or
+  `ratelimit.hit`** — despite the field table marking it "always present."
+  Those events fire in middlewares OUTER to the (innermost) request-logging
+  middleware, so the contextvar isn't bound. Intentional: the order keeps
+  `SecurityHeadersMiddleware` outermost (PR #16 Copilot Comment 2, judged
+  spec-aligned). `cors.preflight_rejected` is emitted by
+  `api/_cors.py:LoggingCORSMiddleware`, a `CORSMiddleware` subclass
+  overriding `preflight_response`.
+- **The scrubber's generic key pattern is `sk-[A-Za-z0-9_-]{20,}`** (the
+  snippet shows `sk-[A-Za-z0-9]{32,}`) so it actually catches `sk-lf-…`
+  (Langfuse secret) and dashed modern OpenAI keys, honoring the snippet
+  comment's stated intent. A root `.gitleaks.toml` allowlists the scrubber
+  test's fake fixtures.
+- **The `Events` taxonomy (`observability/events.py`) is the single source
+  of truth** and also includes the already-emitted agent-loop operational
+  events — `agent.run.started` / `agent.run.completed` / `agent.tool_error`
+  / `agent.unexpected_stop_reason` / `agent.unknown_refusal_category` —
+  alongside the table's events; every `log.*` call routes through a
+  constant. `agent.iteration_limit` is the canonical name (the
+  originally-shipped code emitted `agent.iteration_limit_hit`).
+
+---
+
 ## stdout JSON via structlog (Fork 54)
 
 ### Configuration with dev/prod renderer split
